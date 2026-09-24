@@ -22,6 +22,12 @@ const medicineStyle: Record<Medicine, { dot: string; soft: string; ring: string;
   Lotemax: { dot: "bg-[#6678d4]", soft: "bg-[#e9ecff]", ring: "ring-[#abb5ed]", text: "text-[#485ab8]", button: "bg-[#5b6bc6]", hover: "hover:bg-[#485ab8]" },
 };
 
+const selectedCalendarDot: Record<Medicine, string> = {
+  Navitae: "bg-[#80ded4]",
+  Moxidexa: "bg-[#ffd0aa]",
+  Lotemax: "bg-[#c8d0ff]",
+};
+
 const plan = [
   { week: 1, label: "1. hafta", dates: ["2026-09-24", "2026-09-30"], medicines: [{ name: "Navitae" as const, times: ["08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00", "22:00", "24:00"] }, { name: "Moxidexa" as const, times: ["08:05", "12:05", "17:00", "22:05"] }] },
   { week: 2, label: "2. hafta", dates: ["2026-10-01", "2026-10-07"], medicines: [{ name: "Navitae" as const, times: ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"] }, { name: "Lotemax" as const, times: ["09:00", "14:05", "19:00", "23:00"] }] },
@@ -67,14 +73,6 @@ function readableTime(time: string) { return time === "00:00" ? "00:00 (gece)" :
 function notifyTitle(reminder: Reminder) { return `${reminder.medicine} zamanı`; }
 
 const calendarWeekdays = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
-const calendarMonthFormatter = new Intl.DateTimeFormat("tr-TR", { timeZone: "Europe/Istanbul", month: "long", year: "numeric" });
-
-function calendarMonthDates(anchorDate: string) {
-  const [year, month] = anchorDate.split("-").map(Number);
-  const monthStart = `${year}-${String(month).padStart(2, "0")}-01`;
-  const weekday = (new Date(`${monthStart}T12:00:00+03:00`).getDay() + 6) % 7;
-  return Array.from({ length: 42 }, (_, index) => dateAtOffset(monthStart, index - weekday));
-}
 
 function startLongAlarmTone(context: AudioContext) {
   const siren = context.createOscillator();
@@ -128,6 +126,7 @@ export default function Home() {
   const [showAllToday, setShowAllToday] = useState(false);
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(istanbulNow().date);
   const [alarmsEnabled, setAlarmsEnabled] = useState(false);
+  const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
   const [audioReady, setAudioReady] = useState(false);
   const audioUnlocked = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -156,6 +155,12 @@ export default function Home() {
     return () => document.removeEventListener("pointerdown", closeCalendar);
   }, [showAllToday]);
 
+  useEffect(() => {
+    if (!scheduleWarning) return;
+    const timer = window.setTimeout(() => setScheduleWarning(null), 4500);
+    return () => window.clearTimeout(timer);
+  }, [scheduleWarning]);
+
   const todayReminders = useMemo(() => reminders.filter((reminder) => reminder.date === now.date).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [now.date]);
   const trackingReminders = useMemo(() => {
     const sorted = [...reminders].sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
@@ -165,8 +170,7 @@ export default function Home() {
     return sorted.slice(start, start + 10);
   }, [now]);
   const upcoming = useMemo(() => reminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [now]);
-  const calendarDates = useMemo(() => calendarMonthDates(now.date), [now.date]);
-  const calendarMonth = now.date.slice(0, 7);
+  const calendarDates = useMemo(() => range(dateAtOffset(plan[0].dates[0], -3), plan[plan.length - 1].dates[1]), []);
   const selectedCalendarReminders = useMemo(() => reminders.filter((reminder) => reminder.date === selectedCalendarDate).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [selectedCalendarDate]);
 
   const unlockAudio = useCallback(async () => {
@@ -259,11 +263,20 @@ export default function Home() {
     });
   };
 
+  const handleReminderClick = (reminder: Reminder) => {
+    if (toDate(reminder).getTime() > Date.now()) {
+      setScheduleWarning(`${reminder.medicine} için gereken süre henüz dolmadı. ${weekdayFormatter.format(toDate(reminder))} ${readableTime(reminder.time)} saatini bekleyin.`);
+      return;
+    }
+    markDone(reminder.id);
+  };
+
   const dateHeading = new Date(`${now.date}T12:00:00+03:00`);
   const progress = todayReminders.length ? Math.round((todayReminders.filter((reminder) => completed.includes(reminder.id)).length / todayReminders.length) * 100) : 0;
 
   return (
     <main className="mx-auto min-h-screen max-w-6xl px-5 py-6 sm:px-8 sm:py-10">
+      <AnimatePresence>{scheduleWarning && <motion.button role="alert" onClick={() => setScheduleWarning(null)} initial={{ opacity: 0, y: -16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -16 }} className="fixed left-1/2 top-5 z-[60] flex w-[min(34rem,calc(100vw-2rem))] -translate-x-1/2 items-start gap-3 rounded-2xl border border-[#f7c28e] bg-[#fff7ef] px-4 py-3 text-left text-sm font-semibold text-[#9c4c17] shadow-xl"><span className="flex-1">{scheduleWarning}</span><X size={17} className="shrink-0" /></motion.button>}</AnimatePresence>
       <header className="mb-8 flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex items-center gap-3">
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[#10213a] text-white shadow-lg shadow-[#10213a]/15"><Droplets size={25} strokeWidth={2.2} /></div>
@@ -306,17 +319,17 @@ export default function Home() {
               <div className="mb-5 flex items-start justify-between">
                 <div>
                   <p className="text-xs font-bold uppercase tracking-[.14em] text-[#5b9f99]">Takvim</p>
-                  <h3 className="mt-1 text-xl font-bold capitalize">{calendarMonthFormatter.format(new Date(`${calendarMonth}-01T12:00:00+03:00`))}</h3>
+                  <h3 className="mt-1 text-xl font-bold">24 Eylül – 21 Ekim 2026</h3>
                 </div>
                 <button onClick={() => setShowAllToday(false)} aria-label="Takvimi kapat" className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-500 transition hover:bg-slate-200"><X size={18} /></button>
               </div>
               <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-bold text-slate-400">{calendarWeekdays.map((day) => <span key={day} className="py-1">{day}</span>)}</div>
               <div className="mt-1 grid grid-cols-7 gap-1">{calendarDates.map((date) => {
-                const count = reminders.filter((reminder) => reminder.date === date).length;
-                const isCurrentMonth = date.startsWith(calendarMonth);
+                const medicines = [...new Set(reminders.filter((reminder) => reminder.date === date).map((reminder) => reminder.medicine))];
                 const isToday = date === now.date;
                 const isSelected = date === selectedCalendarDate;
-                return <button key={date} onClick={() => setSelectedCalendarDate(date)} className={`relative aspect-square rounded-xl text-sm font-bold transition ${isSelected ? "bg-[#10213a] text-white shadow-lg" : isToday ? "bg-[#dff3f0] text-[#16756d]" : isCurrentMonth ? "text-[#10213a] hover:bg-slate-100" : "text-slate-300 hover:bg-slate-50"}`}>{Number(date.slice(8))}{count > 0 && <span className={`absolute bottom-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full ${isSelected ? "bg-[#80ded4]" : "bg-[#f29a53]"}`} />}</button>;
+                if (!medicines.length) return <span key={date} aria-hidden="true" className="grid aspect-square place-items-center text-sm font-bold text-slate-300">{Number(date.slice(8))}</span>;
+                return <button key={date} onClick={() => setSelectedCalendarDate(date)} className={`relative aspect-square rounded-xl text-sm font-bold transition ${isSelected ? "bg-[#10213a] text-white shadow-lg" : isToday ? "bg-[#dff3f0] text-[#16756d]" : "text-[#10213a] hover:bg-slate-100"}`}>{Number(date.slice(8))}<span className="absolute bottom-1 left-1/2 flex -translate-x-1/2 gap-1">{medicines.map((medicine) => <span key={medicine} className={`h-1.5 w-1.5 rounded-full ${isSelected ? selectedCalendarDot[medicine] : medicineStyle[medicine].dot}`} />)}</span></button>;
               })}</div>
               <div className="mt-5 border-t border-slate-100 pt-4">
                 <div className="mb-3 flex items-center justify-between">
@@ -331,7 +344,8 @@ export default function Home() {
         {trackingReminders.length ? <div className="grid gap-2 sm:grid-cols-2">{trackingReminders.map((reminder) => {
           const done = completed.includes(reminder.id);
           const current = reminder.date === now.date && reminder.time === now.time;
-          return <motion.button layout key={reminder.id} onClick={() => markDone(reminder.id)} className={`group flex items-center gap-4 rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 ${done ? "border-transparent bg-slate-50 opacity-60 focus:ring-slate-200" : current ? `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]` : "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]"}`}><span className={`h-3 w-3 shrink-0 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><span className="min-w-0 flex-1"><span className={`block font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</span><span className="block text-xs text-slate-500">1 damla {current && "· şimdi"}</span></span><span className="font-bold tabular-nums text-[#10213a]">{readableTime(reminder.time)}</span><span className={`grid h-7 w-7 place-items-center rounded-full border ${done ? `${medicineStyle[reminder.medicine].dot} border-transparent text-white` : "border-slate-200 text-transparent group-hover:text-slate-300"}`}><Check size={15} /></span></motion.button>;
+          const locked = toDate(reminder).getTime() > Date.now();
+          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group flex items-center gap-4 rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 ${done ? "border-transparent bg-slate-50 opacity-60 focus:ring-slate-200" : current ? `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]` : locked ? "cursor-not-allowed border-[#f7c28e] bg-[#fffaf5] focus:ring-[#ffe2c7]" : "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]"}`}><span className={`h-3 w-3 shrink-0 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><span className="min-w-0 flex-1"><span className={`block font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</span><span className="block text-xs text-slate-500">1 damla {current ? "· şimdi" : locked ? "· saati bekleniyor" : ""}</span></span><span className="font-bold tabular-nums text-[#10213a]">{readableTime(reminder.time)}</span><span className={`grid h-7 w-7 place-items-center rounded-full border ${done ? `${medicineStyle[reminder.medicine].dot} border-transparent text-white` : locked ? "border-[#f2b576] text-[#d97631]" : "border-slate-200 text-transparent group-hover:text-slate-300"}`}><Check size={15} /></span></motion.button>;
         })}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Şu anda gösterilecek alarm yok.</div>}
       </section>
 
