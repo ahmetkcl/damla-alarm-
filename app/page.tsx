@@ -121,11 +121,14 @@ function startLongAlarmTone(context: AudioContext) {
   [siren, undertone, sweep, pulse].forEach((node) => node.start());
 
   let stopped = false;
+  let autoStopTimer: number | undefined;
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    if (autoStopTimer) window.clearTimeout(autoStopTimer);
     [siren, undertone, sweep, pulse].forEach((node) => { try { node.stop(); } catch { /* node already stopped */ } });
   };
+  autoStopTimer = window.setTimeout(stop, 2 * 60 * 1000);
   return stop;
 }
 
@@ -141,6 +144,8 @@ export default function Home() {
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(istanbulNow().date);
   const [alarmsEnabled, setAlarmsEnabled] = useState(false);
   const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
+  const [editingReminder, setEditingReminder] = useState<Reminder | null>(null);
+  const [editingTime, setEditingTime] = useState(istanbulNow().time);
   const [audioReady, setAudioReady] = useState(false);
   const audioUnlocked = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -181,9 +186,11 @@ export default function Home() {
     return (["Navitae", "Moxidexa", "Lotemax"] as Medicine[]).flatMap((medicine) => {
       const series = reminders.filter((reminder) => reminder.medicine === medicine).sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
       let previousTimestamp: number | null = null;
+      let hasTakenAnchor = false;
       return series.map((reminder, index) => {
         const takenTimestamp = takenAt[reminder.id] ? new Date(takenAt[reminder.id]).getTime() : null;
-        const timestamp = takenTimestamp ?? (previousTimestamp === null ? toDate(reminder).getTime() : previousTimestamp + followUpInterval(series[Math.max(0, index - 1)]) * 60 * 1000);
+        const timestamp = takenTimestamp ?? (hasTakenAnchor && previousTimestamp !== null ? previousTimestamp + followUpInterval(series[Math.max(0, index - 1)]) * 60 * 1000 : toDate(reminder).getTime());
+        if (takenTimestamp) hasTakenAnchor = true;
         previousTimestamp = timestamp;
         return reminderAt(reminder, timestamp);
       });
@@ -194,13 +201,8 @@ export default function Home() {
     return !markedAt || Date.now() - new Date(markedAt).getTime() < 2 * 60 * 60 * 1000;
   }), [adjustedReminders, takenAt, now]);
   const todayReminders = useMemo(() => adjustedReminders.filter((reminder) => reminder.date === now.date).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [adjustedReminders, now.date]);
-  const trackingReminders = useMemo(() => {
-    const sorted = [...visibleReminders].sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
-    const nextIndex = sorted.findIndex((reminder) => toDate(reminder).getTime() >= Date.now());
-    const desiredStart = nextIndex === -1 ? sorted.length - 10 : nextIndex - 2;
-    const start = Math.max(0, Math.min(desiredStart, Math.max(0, sorted.length - 10)));
-    return sorted.slice(start, start + 10);
-  }, [visibleReminders, now]);
+  const activePlanWeek = useMemo(() => plan.find((week) => now.date >= week.dates[0] && now.date <= week.dates[1]), [now.date]);
+  const nextMedicineReminders = useMemo(() => (activePlanWeek?.medicines ?? []).map(({ name }) => adjustedReminders.find((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now())).filter((reminder): reminder is Reminder => Boolean(reminder)), [activePlanWeek, adjustedReminders, takenAt, now]);
   const upcoming = useMemo(() => adjustedReminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [adjustedReminders, now]);
   const calendarDates = useMemo(() => {
     const lastAdjustedDate = adjustedReminders[adjustedReminders.length - 1]?.date ?? plan[plan.length - 1].dates[1];
@@ -263,6 +265,14 @@ export default function Home() {
       const current = istanbulNow();
       setNow(current);
       if (current.second < 4 || document.visibilityState === "visible") {
+        if (activeAlarm) {
+          const silencedIds = adjustedReminders.filter((reminder) => {
+            const delay = Date.now() - toDate(reminder).getTime();
+            return reminder.id !== activeAlarm.id && delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
+          }).map((reminder) => reminder.id);
+          if (silencedIds.length) setLastTriggered((existing) => [...existing, ...silencedIds].slice(-20));
+          return;
+        }
         const exactMatch = adjustedReminders.find((reminder) => reminder.date === current.date && reminder.time === current.time && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id));
         const due = exactMatch ?? adjustedReminders.find((reminder) => {
           const delay = Date.now() - toDate(reminder).getTime();
@@ -275,7 +285,7 @@ export default function Home() {
     const timer = window.setInterval(tick, 1000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
-  }, [adjustedReminders, fireAlarm, lastTriggered, takenAt]);
+  }, [activeAlarm, adjustedReminders, fireAlarm, lastTriggered, takenAt]);
 
   const enableAlarms = async () => {
     window.localStorage.setItem("damla-alarmi-alarm-enabled", "true");
@@ -287,19 +297,17 @@ export default function Home() {
     }
   };
 
-  const markDone = (id: string) => {
+  const markDoseAt = (id: string, occurredAt = new Date()) => {
     document.title = "Damla Alarmı";
     const badging = navigator as Navigator & { clearAppBadge?: () => Promise<void> };
     void badging.clearAppBadge?.();
     setCompleted((existing) => {
-      const next = existing.includes(id) ? existing.filter((entry) => entry !== id) : [...existing, id];
+      const next = existing.includes(id) ? existing : [...existing, id];
       window.localStorage.setItem("damla-alarmi-completed", JSON.stringify(next));
       return next;
     });
     setTakenAt((existing) => {
-      const next = { ...existing };
-      if (next[id]) delete next[id];
-      else next[id] = new Date().toISOString();
+      const next = { ...existing, [id]: occurredAt.toISOString() };
       window.localStorage.setItem("damla-alarmi-taken-at", JSON.stringify(next));
       return next;
     });
@@ -310,7 +318,20 @@ export default function Home() {
       setScheduleWarning(`${reminder.medicine} için gereken süre henüz dolmadı. ${weekdayFormatter.format(toDate(reminder))} ${readableTime(reminder.time)} saatini bekleyin.`);
       return;
     }
-    markDone(reminder.id);
+    setEditingReminder(reminder);
+    setEditingTime(takenAt[reminder.id] ? istanbulNow(new Date(takenAt[reminder.id])).time : istanbulNow().time);
+  };
+
+  const saveDoseTime = () => {
+    if (!editingReminder) return;
+    const actualDate = istanbulNow().date;
+    const actualTime = new Date(`${actualDate}T${editingTime}:00+03:00`);
+    if (actualTime.getTime() > Date.now()) {
+      setScheduleWarning("İleri bir uygulama saati seçilemez.");
+      return;
+    }
+    markDoseAt(editingReminder.id, actualTime);
+    setEditingReminder(null);
   };
 
   const dateHeading = new Date(`${now.date}T12:00:00+03:00`);
@@ -347,11 +368,10 @@ export default function Home() {
       <section className="rounded-3xl bg-white p-5 shadow-soft sm:p-7">
         <div className="relative mb-5 flex items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-bold uppercase tracking-[.15em] text-[#5b9f99]">Bugün</p>
-            <h2 className="mt-1 text-xl font-bold">Saat saat takip</h2>
+            <p className="text-xs font-bold uppercase tracking-[.15em] text-[#5b9f99]">Sonraki dozlar</p>
+            <h2 className="mt-1 text-xl font-bold">Sıradaki ilaçlar</h2>
           </div>
           <div className="flex items-center gap-2">
-            <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-600">{trackingReminders.length} alarm</span>
             <button ref={calendarTriggerRef} onClick={() => setShowAllToday((open) => !open)} aria-expanded={showAllToday} className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-[#10213a] shadow-sm transition hover:border-[#86cfc8] hover:bg-[#f7fffd] focus:outline-none focus:ring-4 focus:ring-[#d6f0ed]">
               Takvim <ChevronRight size={15} className={`transition ${showAllToday ? "rotate-90" : ""}`} />
             </button>
@@ -378,22 +398,28 @@ export default function Home() {
                   <p className="font-bold">{weekdayFormatter.format(new Date(`${selectedCalendarDate}T12:00:00+03:00`))}</p>
                   <span className="text-xs font-bold text-slate-400">{selectedCalendarReminders.length} alarm</span>
                 </div>
-                {selectedCalendarReminders.length ? <div className="grid grid-cols-2 gap-2">{selectedCalendarReminders.map((reminder) => <div key={`calendar-${reminder.id}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5"><span className={`text-sm font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</span><span className="font-bold tabular-nums text-[#10213a]">{readableTime(reminder.time)}</span></div>)}</div> : <p className="py-4 text-sm text-slate-400">Bu gün için alarm yok.</p>}
+                {selectedCalendarReminders.length ? <div className="grid grid-cols-2 gap-2">{selectedCalendarReminders.map((reminder) => {
+                  const done = completed.includes(reminder.id);
+                  const locked = toDate(reminder).getTime() > Date.now();
+                  return <button key={`calendar-${reminder.id}`} onClick={() => handleReminderClick(reminder)} className={`flex items-center justify-between rounded-xl px-3 py-2.5 text-left transition ${done ? "bg-slate-100 opacity-60" : locked ? "bg-[#fff7ef]" : "bg-slate-50 hover:bg-[#f1fbf9]"}`}><span className={`text-sm font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</span><span className="flex items-center gap-1.5 font-bold tabular-nums text-[#10213a]">{readableTime(reminder.time)}{done && <Check size={14} className={medicineStyle[reminder.medicine].text} />}</span></button>;
+                })}</div> : <p className="py-4 text-sm text-slate-400">Bu gün için alarm yok.</p>}
               </div>
             </motion.aside>}
           </AnimatePresence>
         </div>
-        {trackingReminders.length ? <div className="grid gap-2 sm:grid-cols-2">{trackingReminders.map((reminder) => {
-          const done = completed.includes(reminder.id);
-          const current = reminder.date === now.date && reminder.time === now.time;
+        {nextMedicineReminders.length ? <div className="grid gap-3 sm:grid-cols-2">{nextMedicineReminders.map((reminder) => {
           const locked = toDate(reminder).getTime() > Date.now();
-          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group flex items-center gap-4 rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 ${done ? "border-transparent bg-slate-50 opacity-60 focus:ring-slate-200" : current ? `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]` : locked ? "cursor-not-allowed border-[#f7c28e] bg-[#fffaf5] focus:ring-[#ffe2c7]" : "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]"}`}><span className={`h-3 w-3 shrink-0 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><span className="min-w-0 flex-1"><span className={`block font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</span><span className="block text-xs text-slate-500">1 damla {current ? "· şimdi" : locked ? "· saati bekleniyor" : ""}</span></span><span className="font-bold tabular-nums text-[#10213a]">{readableTime(reminder.time)}</span><span className={`grid h-7 w-7 place-items-center rounded-full border ${done ? `${medicineStyle[reminder.medicine].dot} border-transparent text-white` : locked ? "border-[#f2b576] text-[#d97631]" : "border-slate-200 text-transparent group-hover:text-slate-300"}`}><Check size={15} /></span></motion.button>;
-        })}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Şu anda gösterilecek alarm yok.</div>}
+          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group rounded-2xl border p-5 text-left transition focus:outline-none focus:ring-4 ${locked ? "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]" : `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]`}`}>
+            <div className="flex items-start justify-between gap-4"><div><span className={`inline-flex h-3 w-3 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><p className={`mt-3 text-lg font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</p><p className="mt-1 text-sm text-slate-500">1 damla · {weekdayFormatter.format(toDate(reminder))}</p></div><Clock3 size={21} className={medicineStyle[reminder.medicine].text} /></div>
+            <div className="mt-7 flex items-end justify-between"><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(reminder.time)}</p><span className={`text-xs font-bold ${locked ? "text-slate-400" : medicineStyle[reminder.medicine].text}`}>{locked ? "Saati gelince seç" : "Saati düzenle"}</span></div>
+          </motion.button>;
+        })}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Bu tarih için sıradaki ilaç yok.</div>}
       </section>
 
       <section className="mt-6 rounded-3xl bg-white p-5 shadow-soft sm:p-7"><button onClick={() => setShowAll((open) => !open)} className="flex w-full items-center justify-between text-left"><div><p className="text-xs font-bold uppercase tracking-[.15em] text-[#5b9f99]">Reçete takvimi</p><h2 className="mt-1 text-xl font-bold">4 haftalık planı görüntüle</h2></div><ChevronRight className={`transition ${showAll ? "rotate-90" : ""}`} /></button><AnimatePresence>{showAll && <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden"><div className="mt-6 grid gap-3 sm:grid-cols-2">{plan.map((week) => <div key={week.week} className="rounded-2xl bg-slate-50 p-4"><p className="font-bold">{week.label}</p><p className="mt-1 text-xs text-slate-500">{week.dates[0].slice(8)} {week.dates[0].slice(5, 7) === "09" ? "Eylül" : "Ekim"} – {week.dates[1].slice(8)} {week.dates[1].slice(5, 7) === "09" ? "Eylül" : "Ekim"}</p>{week.medicines.map((medicine) => <div key={medicine.name} className="mt-3 border-t border-slate-200 pt-3"><p className="text-sm font-bold">{medicine.name}</p><p className="mt-1 text-xs leading-5 text-slate-600">{medicine.times.map(readableTime).join(" · ")}</p></div>)}</div>)}</div></motion.div>}</AnimatePresence></section>
 
-      <AnimatePresence>{activeAlarm && <motion.div className="fixed inset-0 z-50 grid place-items-center bg-[#07172c]/50 p-5 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><motion.div initial={{ y: 24, scale: .96 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: .97 }} className="relative w-full max-w-md overflow-hidden rounded-[2rem] bg-white p-7 text-center shadow-2xl"><button onClick={() => { stopLongAlarm(); setActiveAlarm(null); }} className="absolute right-5 top-5 grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200"><X size={18} /></button><motion.div animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.35 }} className={`mx-auto grid h-20 w-20 place-items-center rounded-full ${medicineStyle[activeAlarm.medicine].soft}`}><Volume2 size={33} className={medicineStyle[activeAlarm.medicine].text} /></motion.div><p className={`mt-6 text-sm font-bold uppercase tracking-[.15em] ${medicineStyle[activeAlarm.medicine].text}`}>Damla zamanı</p><h2 className={`mt-2 text-3xl font-bold ${medicineStyle[activeAlarm.medicine].text}`}>{activeAlarm.medicine}</h2><p className="mt-2 text-slate-600">Şimdi <strong>1 damla</strong> uygulayın.</p><button onClick={() => { stopLongAlarm(); markDone(activeAlarm.id); setActiveAlarm(null); }} className={`mt-7 w-full rounded-xl px-5 py-3.5 font-bold text-white ${medicineStyle[activeAlarm.medicine].button} ${medicineStyle[activeAlarm.medicine].hover}`}>Uyguladım</button><button onClick={() => { void playLongAlarm(); }} className={`mt-3 text-sm font-bold ${medicineStyle[activeAlarm.medicine].text} hover:underline`}>Sesi tekrar çal</button></motion.div></motion.div>}</AnimatePresence>
+      <AnimatePresence>{editingReminder && <motion.div className="fixed inset-0 z-50 grid place-items-center bg-[#07172c]/50 p-5 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><motion.form onSubmit={(event) => { event.preventDefault(); saveDoseTime(); }} initial={{ y: 24, scale: .96 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: .97 }} className="relative w-full max-w-sm rounded-[2rem] bg-white p-7 shadow-2xl"><button type="button" onClick={() => setEditingReminder(null)} className="absolute right-5 top-5 grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200"><X size={18} /></button><p className={`text-sm font-bold uppercase tracking-[.15em] ${medicineStyle[editingReminder.medicine].text}`}>{editingReminder.medicine}</p><h2 className="mt-2 text-2xl font-bold text-[#10213a]">Uygulama saatini seç</h2><p className="mt-2 text-sm leading-6 text-slate-500">Bu saatten sonraki alarmlar otomatik olarak yeniden hesaplanır.</p><label className="mt-6 block text-sm font-bold text-[#10213a]">Gerçek uygulama saati<input type="time" value={editingTime} onChange={(event) => setEditingTime(event.target.value)} className="mt-2 block w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xl font-bold text-[#10213a] outline-none focus:border-[#86cfc8] focus:ring-4 focus:ring-[#d6f0ed]" required /></label><button type="submit" className={`mt-6 w-full rounded-xl px-5 py-3.5 font-bold text-white ${medicineStyle[editingReminder.medicine].button} ${medicineStyle[editingReminder.medicine].hover}`}>Bu saatte işaretle</button></motion.form></motion.div>}</AnimatePresence>
+      <AnimatePresence>{activeAlarm && <motion.div className="fixed inset-0 z-50 grid place-items-center bg-[#07172c]/50 p-5 backdrop-blur-sm" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><motion.div initial={{ y: 24, scale: .96 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: .97 }} className="relative w-full max-w-md overflow-hidden rounded-[2rem] bg-white p-7 text-center shadow-2xl"><button onClick={() => { stopLongAlarm(); markDoseAt(activeAlarm.id); setActiveAlarm(null); }} className="absolute right-5 top-5 grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200"><X size={18} /></button><motion.div animate={{ scale: [1, 1.08, 1] }} transition={{ repeat: Infinity, duration: 1.35 }} className={`mx-auto grid h-20 w-20 place-items-center rounded-full ${medicineStyle[activeAlarm.medicine].soft}`}><Volume2 size={33} className={medicineStyle[activeAlarm.medicine].text} /></motion.div><p className={`mt-6 text-sm font-bold uppercase tracking-[.15em] ${medicineStyle[activeAlarm.medicine].text}`}>Damla zamanı</p><h2 className={`mt-2 text-3xl font-bold ${medicineStyle[activeAlarm.medicine].text}`}>{activeAlarm.medicine}</h2><p className="mt-2 text-slate-600">Şimdi <strong>1 damla</strong> uygulayın.</p><p className="mt-2 text-xs font-semibold text-slate-400">Alarm sesi en fazla 2 dakika sürer.</p><button onClick={() => { stopLongAlarm(); markDoseAt(activeAlarm.id); setActiveAlarm(null); }} className={`mt-7 w-full rounded-xl px-5 py-3.5 font-bold text-white ${medicineStyle[activeAlarm.medicine].button} ${medicineStyle[activeAlarm.medicine].hover}`}>Uyguladım</button><button onClick={() => { void playLongAlarm(); }} className={`mt-3 text-sm font-bold ${medicineStyle[activeAlarm.medicine].text} hover:underline`}>Sesi tekrar çal</button></motion.div></motion.div>}</AnimatePresence>
     </main>
   );
 }
