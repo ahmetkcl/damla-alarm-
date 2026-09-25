@@ -263,10 +263,10 @@ export default function Home() {
       const current = istanbulNow();
       setNow(current);
       if (current.second < 4 || document.visibilityState === "visible") {
-        const exactMatch = reminders.find((reminder) => reminder.date === current.date && reminder.time === current.time && !lastTriggered.includes(reminder.id));
-        const due = exactMatch ?? reminders.find((reminder) => {
+        const exactMatch = adjustedReminders.find((reminder) => reminder.date === current.date && reminder.time === current.time && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id));
+        const due = exactMatch ?? adjustedReminders.find((reminder) => {
           const delay = Date.now() - toDate(reminder).getTime();
-          return delay >= 0 && delay <= 5 * 60 * 1000 && !lastTriggered.includes(reminder.id);
+          return delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
         });
         if (due) fireAlarm(due);
       }
@@ -275,7 +275,7 @@ export default function Home() {
     const timer = window.setInterval(tick, 1000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
-  }, [fireAlarm, lastTriggered]);
+  }, [adjustedReminders, fireAlarm, lastTriggered, takenAt]);
 
   const enableAlarms = async () => {
     window.localStorage.setItem("damla-alarmi-alarm-enabled", "true");
@@ -294,6 +294,13 @@ export default function Home() {
     setCompleted((existing) => {
       const next = existing.includes(id) ? existing.filter((entry) => entry !== id) : [...existing, id];
       window.localStorage.setItem("damla-alarmi-completed", JSON.stringify(next));
+      return next;
+    });
+    setTakenAt((existing) => {
+      const next = { ...existing };
+      if (next[id]) delete next[id];
+      else next[id] = new Date().toISOString();
+      window.localStorage.setItem("damla-alarmi-taken-at", JSON.stringify(next));
       return next;
     });
   };
@@ -360,7 +367,7 @@ export default function Home() {
               </div>
               <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-bold text-slate-400">{calendarWeekdays.map((day) => <span key={day} className="py-1">{day}</span>)}</div>
               <div className="mt-1 grid grid-cols-7 gap-1">{calendarDates.map((date) => {
-                const medicines = [...new Set(reminders.filter((reminder) => reminder.date === date).map((reminder) => reminder.medicine))];
+                const medicines = [...new Set(visibleReminders.filter((reminder) => reminder.date === date).map((reminder) => reminder.medicine))];
                 const isToday = date === now.date;
                 const isSelected = date === selectedCalendarDate;
                 if (!medicines.length) return <span key={date} aria-hidden="true" className="grid aspect-square place-items-center text-sm font-bold text-slate-300">{Number(date.slice(8))}</span>;
