@@ -76,6 +76,15 @@ const followUpMinutes: Record<number, Partial<Record<Medicine, number>>> = {
 };
 
 function followUpInterval(reminder: Reminder) { return followUpMinutes[reminder.week][reminder.medicine] ?? 240; }
+function isQuietHour(timestamp: number) {
+  const hour = Number(istanbulNow(new Date(timestamp)).time.slice(0, 2));
+  return hour >= 2 && hour < 8;
+}
+function nextAllowedAlarmTime(timestamp: number) {
+  if (!isQuietHour(timestamp)) return timestamp;
+  const local = istanbulNow(new Date(timestamp));
+  return new Date(`${local.date}T08:00:00+03:00`).getTime();
+}
 function reminderAt(reminder: Reminder, timestamp: number): Reminder {
   const local = istanbulNow(new Date(timestamp));
   return { ...reminder, date: local.date, time: local.time };
@@ -150,6 +159,7 @@ export default function Home() {
   const audioUnlocked = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const stopToneRef = useRef<(() => void) | null>(null);
+  const dailyAlarmResetRef = useRef<string>("");
   const calendarPanelRef = useRef<HTMLElement | null>(null);
   const calendarTriggerRef = useRef<HTMLButtonElement | null>(null);
 
@@ -189,7 +199,7 @@ export default function Home() {
       let hasTakenAnchor = false;
       return series.map((reminder, index) => {
         const takenTimestamp = takenAt[reminder.id] ? new Date(takenAt[reminder.id]).getTime() : null;
-        const timestamp = takenTimestamp ?? (hasTakenAnchor && previousTimestamp !== null ? previousTimestamp + followUpInterval(series[Math.max(0, index - 1)]) * 60 * 1000 : toDate(reminder).getTime());
+        const timestamp = takenTimestamp ?? (hasTakenAnchor && previousTimestamp !== null ? nextAllowedAlarmTime(previousTimestamp + followUpInterval(series[Math.max(0, index - 1)]) * 60 * 1000) : toDate(reminder).getTime());
         if (takenTimestamp) hasTakenAnchor = true;
         previousTimestamp = timestamp;
         return reminderAt(reminder, timestamp);
@@ -204,7 +214,7 @@ export default function Home() {
   const activePlanWeek = useMemo(() => plan.find((week) => now.date >= week.dates[0] && now.date <= week.dates[1]), [now.date]);
   const nextMedicineGroups = useMemo(() => (activePlanWeek?.medicines ?? []).map(({ name }) => ({
     medicine: name,
-    reminders: adjustedReminders.filter((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now()).slice(0, 2),
+    reminders: adjustedReminders.filter((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now()).slice(0, 1),
   })).filter((group) => group.reminders.length > 0), [activePlanWeek, adjustedReminders, takenAt, now]);
   const upcoming = useMemo(() => adjustedReminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [adjustedReminders, now]);
   const calendarDates = useMemo(() => {
@@ -267,6 +277,18 @@ export default function Home() {
     const tick = () => {
       const current = istanbulNow();
       setNow(current);
+      const currentTimestamp = Date.now();
+      if (current.time === "08:00" && dailyAlarmResetRef.current !== current.date) {
+        dailyAlarmResetRef.current = current.date;
+        setLastTriggered([]);
+      }
+      if (isQuietHour(currentTimestamp)) {
+        if (activeAlarm) {
+          stopLongAlarm();
+          setActiveAlarm(null);
+        }
+        return;
+      }
       if (current.second < 4 || document.visibilityState === "visible") {
         if (activeAlarm) {
           const silencedIds = adjustedReminders.filter((reminder) => {
@@ -288,7 +310,7 @@ export default function Home() {
     const timer = window.setInterval(tick, 1000);
     document.addEventListener("visibilitychange", tick);
     return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", tick); };
-  }, [activeAlarm, adjustedReminders, fireAlarm, lastTriggered, takenAt]);
+  }, [activeAlarm, adjustedReminders, fireAlarm, lastTriggered, stopLongAlarm, takenAt]);
 
   const enableAlarms = async () => {
     window.localStorage.setItem("damla-alarmi-alarm-enabled", "true");
@@ -317,10 +339,6 @@ export default function Home() {
   };
 
   const handleReminderClick = (reminder: Reminder) => {
-    if (toDate(reminder).getTime() > Date.now()) {
-      setScheduleWarning(`${reminder.medicine} için gereken süre henüz dolmadı. ${weekdayFormatter.format(toDate(reminder))} ${readableTime(reminder.time)} saatini bekleyin.`);
-      return;
-    }
     setEditingReminder(reminder);
     setEditingTime(takenAt[reminder.id] ? istanbulNow(new Date(takenAt[reminder.id])).time : istanbulNow().time);
   };
@@ -411,10 +429,9 @@ export default function Home() {
           </AnimatePresence>
         </div>
         {nextMedicineGroups.length ? <div className="grid gap-3 sm:grid-cols-2">{nextMedicineGroups.map((group) => <div key={group.medicine} className="grid gap-3">{group.reminders.map((reminder) => {
-          const locked = toDate(reminder).getTime() > Date.now();
-          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 ${locked ? "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]" : `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]`}`}>
+          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className="group rounded-2xl border border-slate-100 bg-white p-4 text-left transition hover:border-[#a8dcd6] focus:outline-none focus:ring-4 focus:ring-[#d6f0ed]">
             <div className="flex items-start justify-between gap-4"><div><span className={`inline-flex h-3 w-3 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><p className={`mt-3 text-lg font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</p><p className="mt-1 text-sm text-slate-500">1 damla · {weekdayFormatter.format(toDate(reminder))}</p></div><Clock3 size={21} className={medicineStyle[reminder.medicine].text} /></div>
-            <div className="mt-5 flex items-end justify-between"><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(reminder.time)}</p><span className={`text-xs font-bold ${locked ? "text-slate-400" : medicineStyle[reminder.medicine].text}`}>{locked ? "Saati gelince seç" : "Saati düzenle"}</span></div>
+            <div className="mt-5 flex items-end justify-between"><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(reminder.time)}</p><span className={`text-xs font-bold ${medicineStyle[reminder.medicine].text}`}>Saati düzenle</span></div>
           </motion.button>;
         })}</div>)}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Bu tarih için sıradaki ilaç yok.</div>}
       </section>
