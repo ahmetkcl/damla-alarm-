@@ -202,7 +202,10 @@ export default function Home() {
   }), [adjustedReminders, takenAt, now]);
   const todayReminders = useMemo(() => adjustedReminders.filter((reminder) => reminder.date === now.date).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [adjustedReminders, now.date]);
   const activePlanWeek = useMemo(() => plan.find((week) => now.date >= week.dates[0] && now.date <= week.dates[1]), [now.date]);
-  const nextMedicineReminders = useMemo(() => (activePlanWeek?.medicines ?? []).map(({ name }) => adjustedReminders.find((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now())).filter((reminder): reminder is Reminder => Boolean(reminder)), [activePlanWeek, adjustedReminders, takenAt, now]);
+  const nextMedicineGroups = useMemo(() => (activePlanWeek?.medicines ?? []).map(({ name }) => ({
+    medicine: name,
+    reminders: adjustedReminders.filter((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now()).slice(0, 2),
+  })).filter((group) => group.reminders.length > 0), [activePlanWeek, adjustedReminders, takenAt, now]);
   const upcoming = useMemo(() => adjustedReminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [adjustedReminders, now]);
   const calendarDates = useMemo(() => {
     const lastAdjustedDate = adjustedReminders[adjustedReminders.length - 1]?.date ?? plan[plan.length - 1].dates[1];
@@ -407,13 +410,13 @@ export default function Home() {
             </motion.aside>}
           </AnimatePresence>
         </div>
-        {nextMedicineReminders.length ? <div className="grid gap-3 sm:grid-cols-2">{nextMedicineReminders.map((reminder) => {
+        {nextMedicineGroups.length ? <div className="grid gap-3 sm:grid-cols-2">{nextMedicineGroups.map((group) => <div key={group.medicine} className="grid gap-3">{group.reminders.map((reminder) => {
           const locked = toDate(reminder).getTime() > Date.now();
-          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group rounded-2xl border p-5 text-left transition focus:outline-none focus:ring-4 ${locked ? "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]" : `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]`}`}>
+          return <motion.button layout key={reminder.id} onClick={() => handleReminderClick(reminder)} className={`group rounded-2xl border p-4 text-left transition focus:outline-none focus:ring-4 ${locked ? "border-slate-100 bg-white hover:border-[#a8dcd6] focus:ring-[#d6f0ed]" : `${medicineStyle[reminder.medicine].ring} bg-white ring-2 focus:ring-[#8bd7d0]`}`}>
             <div className="flex items-start justify-between gap-4"><div><span className={`inline-flex h-3 w-3 rounded-full ${medicineStyle[reminder.medicine].dot}`} /><p className={`mt-3 text-lg font-bold ${medicineStyle[reminder.medicine].text}`}>{reminder.medicine}</p><p className="mt-1 text-sm text-slate-500">1 damla · {weekdayFormatter.format(toDate(reminder))}</p></div><Clock3 size={21} className={medicineStyle[reminder.medicine].text} /></div>
-            <div className="mt-7 flex items-end justify-between"><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(reminder.time)}</p><span className={`text-xs font-bold ${locked ? "text-slate-400" : medicineStyle[reminder.medicine].text}`}>{locked ? "Saati gelince seç" : "Saati düzenle"}</span></div>
+            <div className="mt-5 flex items-end justify-between"><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(reminder.time)}</p><span className={`text-xs font-bold ${locked ? "text-slate-400" : medicineStyle[reminder.medicine].text}`}>{locked ? "Saati gelince seç" : "Saati düzenle"}</span></div>
           </motion.button>;
-        })}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Bu tarih için sıradaki ilaç yok.</div>}
+        })}</div>)}</div> : <div className="rounded-2xl bg-[#f7fffd] p-6 text-sm leading-6 text-slate-600">Bu tarih için sıradaki ilaç yok.</div>}
       </section>
 
       <section className="mt-6 rounded-3xl bg-white p-5 shadow-soft sm:p-7"><button onClick={() => setShowAll((open) => !open)} className="flex w-full items-center justify-between text-left"><div><p className="text-xs font-bold uppercase tracking-[.15em] text-[#5b9f99]">Reçete takvimi</p><h2 className="mt-1 text-xl font-bold">4 haftalık planı görüntüle</h2></div><ChevronRight className={`transition ${showAll ? "rotate-90" : ""}`} /></button><AnimatePresence>{showAll && <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden"><div className="mt-6 grid gap-3 sm:grid-cols-2">{plan.map((week) => <div key={week.week} className="rounded-2xl bg-slate-50 p-4"><p className="font-bold">{week.label}</p><p className="mt-1 text-xs text-slate-500">{week.dates[0].slice(8)} {week.dates[0].slice(5, 7) === "09" ? "Eylül" : "Ekim"} – {week.dates[1].slice(8)} {week.dates[1].slice(5, 7) === "09" ? "Eylül" : "Ekim"}</p>{week.medicines.map((medicine) => <div key={medicine.name} className="mt-3 border-t border-slate-200 pt-3"><p className="text-sm font-bold">{medicine.name}</p><p className="mt-1 text-xs leading-5 text-slate-600">{medicine.times.map(readableTime).join(" · ")}</p></div>)}</div>)}</div></motion.div>}</AnimatePresence></section>
