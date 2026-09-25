@@ -216,7 +216,6 @@ export default function Home() {
     medicine: name,
     reminders: adjustedReminders.filter((reminder) => reminder.medicine === name && !takenAt[reminder.id] && toDate(reminder).getTime() >= Date.now()).slice(0, 1),
   })).filter((group) => group.reminders.length > 0), [activePlanWeek, adjustedReminders, takenAt, now]);
-  const upcoming = useMemo(() => adjustedReminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [adjustedReminders, now]);
   const calendarDates = useMemo(() => {
     const lastAdjustedDate = adjustedReminders[adjustedReminders.length - 1]?.date ?? plan[plan.length - 1].dates[1];
     return range(dateAtOffset(plan[0].dates[0], -3), lastAdjustedDate > plan[plan.length - 1].dates[1] ? lastAdjustedDate : plan[plan.length - 1].dates[1]);
@@ -376,13 +375,6 @@ export default function Home() {
         <div className="relative grid gap-7 lg:grid-cols-[1fr_auto] lg:items-end">
           <div><p className="mb-3 text-sm font-semibold text-[#8bd7d0]">{weekdayFormatter.format(dateHeading)}</p><h2 className="max-w-xl text-3xl font-bold leading-tight sm:text-4xl">Bugünün damla planı<br /><span className="text-[#9fe6de]">kontrol altında.</span></h2></div>
           <div className="min-w-52 rounded-2xl border border-white/10 bg-white/10 p-4 backdrop-blur"><div className="flex justify-between text-xs font-semibold text-slate-300"><span>Bugünkü ilerleme</span><span>{progress}%</span></div><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/15"><motion.div className="h-full rounded-full bg-[#80ded4]" animate={{ width: `${progress}%` }} /></div><p className="mt-3 text-sm font-semibold">{todayReminders.filter((reminder) => completed.includes(reminder.id)).length} / {todayReminders.length} tamamlandı</p></div>
-        </div>
-      </section>
-
-      <section className="mb-6">
-        <div className="rounded-3xl bg-white p-5 shadow-soft sm:p-6">
-          <div className="mb-5 flex items-center justify-between"><div><p className="text-xs font-bold uppercase tracking-[.15em] text-[#5b9f99]">Sıradaki alarm</p><h2 className={`mt-1 text-xl font-bold ${upcoming ? medicineStyle[upcoming.medicine].text : ""}`}>{upcoming ? upcoming.medicine : "Plan tamamlandı"}</h2></div><div className={`grid h-12 w-12 place-items-center rounded-2xl ${upcoming ? medicineStyle[upcoming.medicine].soft : "bg-[#e2f5f2]"} ${upcoming ? medicineStyle[upcoming.medicine].text : "text-[#24877f]"}`}><Clock3 size={22} /></div></div>
-          {upcoming ? <div className="flex items-end justify-between gap-4"><div><p className="text-4xl font-bold tracking-tight text-[#10213a]">{readableTime(upcoming.time)}</p><p className="mt-1 text-sm text-slate-500">{weekdayFormatter.format(toDate(upcoming))} · {upcoming.week}. hafta</p></div><span className={`rounded-full px-3 py-1.5 text-sm font-bold ${medicineStyle[upcoming.medicine].soft}`}>1 damla</span></div> : <p className="text-slate-500">24 Eylül–21 Ekim programı bitti.</p>}
         </div>
       </section>
 
