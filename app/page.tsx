@@ -68,6 +68,19 @@ function istanbulNow(date = new Date()) {
   return { date: `${values.year}-${values.month}-${values.day}`, time: `${values.hour}:${values.minute}`, second: Number(values.second) };
 }
 
+const followUpMinutes: Record<number, Partial<Record<Medicine, number>>> = {
+  1: { Navitae: 120, Moxidexa: 240 },
+  2: { Navitae: 180, Lotemax: 300 },
+  3: { Navitae: 180, Lotemax: 480 },
+  4: { Navitae: 240, Lotemax: 840 },
+};
+
+function followUpInterval(reminder: Reminder) { return followUpMinutes[reminder.week][reminder.medicine] ?? 240; }
+function reminderAt(reminder: Reminder, timestamp: number): Reminder {
+  const local = istanbulNow(new Date(timestamp));
+  return { ...reminder, date: local.date, time: local.time };
+}
+
 function toDate(reminder: Reminder) { return new Date(`${reminder.date}T${reminder.time}:00+03:00`); }
 function readableTime(time: string) { return time === "00:00" ? "00:00 (gece)" : time; }
 function notifyTitle(reminder: Reminder) { return `${reminder.medicine} zamanı`; }
@@ -121,6 +134,7 @@ export default function Home() {
   const [notifications, setNotifications] = useState<NotificationPermission | "unsupported">("unsupported");
   const [activeAlarm, setActiveAlarm] = useState<Reminder | null>(null);
   const [completed, setCompleted] = useState<string[]>([]);
+  const [takenAt, setTakenAt] = useState<Record<string, string>>({});
   const [lastTriggered, setLastTriggered] = useState<string[]>([]);
   const [showAll, setShowAll] = useState(false);
   const [showAllToday, setShowAllToday] = useState(false);
@@ -139,6 +153,8 @@ export default function Home() {
     setNotifications(permission);
     const saved = window.localStorage.getItem("damla-alarmi-completed");
     if (saved) setCompleted(JSON.parse(saved));
+    const savedTakenAt = window.localStorage.getItem("damla-alarmi-taken-at");
+    if (savedTakenAt) setTakenAt(JSON.parse(savedTakenAt));
     setAlarmsEnabled(window.localStorage.getItem("damla-alarmi-alarm-enabled") === "true");
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
   }, []);
@@ -161,17 +177,36 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [scheduleWarning]);
 
-  const todayReminders = useMemo(() => reminders.filter((reminder) => reminder.date === now.date).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [now.date]);
+  const adjustedReminders = useMemo(() => {
+    return (["Navitae", "Moxidexa", "Lotemax"] as Medicine[]).flatMap((medicine) => {
+      const series = reminders.filter((reminder) => reminder.medicine === medicine).sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
+      let previousTimestamp: number | null = null;
+      return series.map((reminder, index) => {
+        const takenTimestamp = takenAt[reminder.id] ? new Date(takenAt[reminder.id]).getTime() : null;
+        const timestamp = takenTimestamp ?? (previousTimestamp === null ? toDate(reminder).getTime() : previousTimestamp + followUpInterval(series[Math.max(0, index - 1)]) * 60 * 1000);
+        previousTimestamp = timestamp;
+        return reminderAt(reminder, timestamp);
+      });
+    }).sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
+  }, [takenAt]);
+  const visibleReminders = useMemo(() => adjustedReminders.filter((reminder) => {
+    const markedAt = takenAt[reminder.id];
+    return !markedAt || Date.now() - new Date(markedAt).getTime() < 2 * 60 * 60 * 1000;
+  }), [adjustedReminders, takenAt, now]);
+  const todayReminders = useMemo(() => adjustedReminders.filter((reminder) => reminder.date === now.date).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [adjustedReminders, now.date]);
   const trackingReminders = useMemo(() => {
-    const sorted = [...reminders].sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
+    const sorted = [...visibleReminders].sort((a, b) => toDate(a).getTime() - toDate(b).getTime());
     const nextIndex = sorted.findIndex((reminder) => toDate(reminder).getTime() >= Date.now());
     const desiredStart = nextIndex === -1 ? sorted.length - 10 : nextIndex - 2;
     const start = Math.max(0, Math.min(desiredStart, Math.max(0, sorted.length - 10)));
     return sorted.slice(start, start + 10);
-  }, [now]);
-  const upcoming = useMemo(() => reminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [now]);
-  const calendarDates = useMemo(() => range(dateAtOffset(plan[0].dates[0], -3), plan[plan.length - 1].dates[1]), []);
-  const selectedCalendarReminders = useMemo(() => reminders.filter((reminder) => reminder.date === selectedCalendarDate).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [selectedCalendarDate]);
+  }, [visibleReminders, now]);
+  const upcoming = useMemo(() => adjustedReminders.filter((reminder) => toDate(reminder).getTime() >= Date.now()).sort((a, b) => toDate(a).getTime() - toDate(b).getTime())[0], [adjustedReminders, now]);
+  const calendarDates = useMemo(() => {
+    const lastAdjustedDate = adjustedReminders[adjustedReminders.length - 1]?.date ?? plan[plan.length - 1].dates[1];
+    return range(dateAtOffset(plan[0].dates[0], -3), lastAdjustedDate > plan[plan.length - 1].dates[1] ? lastAdjustedDate : plan[plan.length - 1].dates[1]);
+  }, [adjustedReminders]);
+  const selectedCalendarReminders = useMemo(() => visibleReminders.filter((reminder) => reminder.date === selectedCalendarDate).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [visibleReminders, selectedCalendarDate]);
 
   const unlockAudio = useCallback(async () => {
     const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
