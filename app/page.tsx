@@ -334,22 +334,23 @@ export default function Home() {
         }
         return;
       }
-      if (current.second < 4 || document.visibilityState === "visible") {
-        if (activeAlarm) {
-          const silencedIds = adjustedReminders.filter((reminder) => {
-            const delay = Date.now() - toDate(reminder).getTime();
-            return reminder.id !== activeAlarm.id && delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
-          }).map((reminder) => reminder.id);
-          if (silencedIds.length) setLastTriggered((existing) => [...existing, ...silencedIds].slice(-20));
-          return;
-        }
-        const exactMatch = adjustedReminders.find((reminder) => reminder.date === current.date && reminder.time === current.time && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id));
-        const due = exactMatch ?? adjustedReminders.find((reminder) => {
+      if (activeAlarm) {
+        const silencedIds = adjustedReminders.filter((reminder) => {
           const delay = Date.now() - toDate(reminder).getTime();
-          return delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
-        });
-        if (due) fireAlarm(due);
+          return reminder.id !== activeAlarm.id && delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
+        }).map((reminder) => reminder.id);
+        if (silencedIds.length) setLastTriggered((existing) => [...existing, ...silencedIds].slice(-20));
+        return;
       }
+      // Background tabs may have their timers throttled past the exact minute.
+      // Check on every tick and accept alarms up to five minutes late instead
+      // of only checking during the first four seconds of a minute.
+      const exactMatch = adjustedReminders.find((reminder) => reminder.date === current.date && reminder.time === current.time && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id));
+      const due = exactMatch ?? adjustedReminders.find((reminder) => {
+        const delay = Date.now() - toDate(reminder).getTime();
+        return delay >= 0 && delay <= 5 * 60 * 1000 && !takenAt[reminder.id] && !lastTriggered.includes(reminder.id);
+      });
+      if (due) fireAlarm(due);
     };
     tick();
     const timer = window.setInterval(tick, 1000);
@@ -437,7 +438,7 @@ export default function Home() {
           <div><p className="text-xs font-bold uppercase tracking-[.18em] text-[#4c8f8a]">Kişisel takip</p><h1 className="text-2xl font-bold tracking-tight">Damla Alarmı</h1></div>
         </div>
         <button onClick={enableAlarms} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#10213a] px-4 py-3 text-sm font-bold text-white transition hover:-translate-y-0.5 hover:bg-[#193250] focus:outline-none focus:ring-4 focus:ring-[#10213a]/15">
-          {alarmsEnabled ? <BellRing size={17} /> : <Bell size={17} />}{alarmsEnabled ? backgroundPushReady ? "Arka plan alarmları açık" : "Alarmları etkinleştir" : "Alarmları etkinleştir"}
+          {alarmsEnabled ? <BellRing size={17} /> : <Bell size={17} />}{alarmsEnabled ? backgroundPushReady ? "Arka plan alarmları açık" : "Bu tarayıcıda açık" : "Alarmları etkinleştir"}
         </button>
       </header>
 
