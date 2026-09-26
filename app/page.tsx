@@ -94,6 +94,36 @@ function toDate(reminder: Reminder) { return new Date(`${reminder.date}T${remind
 function readableTime(time: string) { return time === "00:00" ? "00:00 (gece)" : time; }
 function notifyTitle(reminder: Reminder) { return `${reminder.medicine} zamanı`; }
 
+function base64UrlToBytes(base64Url: string) {
+  const padding = "=".repeat((4 - base64Url.length % 4) % 4);
+  const base64 = (base64Url + padding).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(window.atob(base64), (character) => character.charCodeAt(0));
+}
+
+async function registerBackgroundPush(reminders: Reminder[], completedIds: string[]) {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    throw new Error("Bu tarayıcı arka plan push bildirimlerini desteklemiyor.");
+  }
+  const keyResponse = await fetch("/api/push/key", { cache: "no-store" });
+  const keyPayload = await keyResponse.json() as { publicKey?: string; error?: string };
+  if (!keyResponse.ok || !keyPayload.publicKey) throw new Error(keyPayload.error ?? "Push anahtarı alınamadı.");
+  const registration = await navigator.serviceWorker.ready;
+  const subscription = await registration.pushManager.getSubscription()
+    ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(keyPayload.publicKey) });
+  const schedule = reminders.filter((reminder) => !completedIds.includes(reminder.id)).map((reminder) => ({
+    id: reminder.id,
+    medicine: reminder.medicine,
+    at: toDate(reminder).toISOString(),
+  }));
+  const syncResponse = await fetch("/api/push/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subscription: subscription.toJSON(), reminders: schedule, completedIds }),
+  });
+  const syncPayload = await syncResponse.json() as { error?: string };
+  if (!syncResponse.ok) throw new Error(syncPayload.error ?? "Sunucuya alarm planı kaydedilemedi.");
+}
+
 const calendarWeekdays = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 
 function startLongAlarmTone(context: AudioContext) {
@@ -152,6 +182,8 @@ export default function Home() {
   const [showAllToday, setShowAllToday] = useState(false);
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(istanbulNow().date);
   const [alarmsEnabled, setAlarmsEnabled] = useState(false);
+  const [backgroundPushReady, setBackgroundPushReady] = useState(false);
+  const [pushSyncRequest, setPushSyncRequest] = useState(0);
   const [scheduleWarning, setScheduleWarning] = useState<string | null>(null);
   const [editingReminder, setEditingReminder] = useState<Reminder | null>(null);
   const [editingTime, setEditingTime] = useState(istanbulNow().time);
@@ -221,6 +253,20 @@ export default function Home() {
     return range(dateAtOffset(plan[0].dates[0], -3), lastAdjustedDate > plan[plan.length - 1].dates[1] ? lastAdjustedDate : plan[plan.length - 1].dates[1]);
   }, [adjustedReminders]);
   const selectedCalendarReminders = useMemo(() => visibleReminders.filter((reminder) => reminder.date === selectedCalendarDate).sort((a, b) => toDate(a).getTime() - toDate(b).getTime()), [visibleReminders, selectedCalendarDate]);
+  const pendingPushReminders = useMemo(() => adjustedReminders.filter((reminder) => !takenAt[reminder.id]), [adjustedReminders, takenAt]);
+
+  useEffect(() => {
+    if (!alarmsEnabled || notifications !== "granted") return;
+    let cancelled = false;
+    registerBackgroundPush(pendingPushReminders, completed).then(() => {
+      if (!cancelled) setBackgroundPushReady(true);
+    }).catch((error: unknown) => {
+      if (cancelled) return;
+      setBackgroundPushReady(false);
+      setScheduleWarning(`Arka plan bildirimi kurulamadı: ${error instanceof Error ? error.message : "sunucu ayarları eksik."}`);
+    });
+    return () => { cancelled = true; };
+  }, [alarmsEnabled, notifications, pendingPushReminders, completed, pushSyncRequest]);
 
   const unlockAudio = useCallback(async () => {
     const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -312,19 +358,27 @@ export default function Home() {
   }, [activeAlarm, adjustedReminders, fireAlarm, lastTriggered, stopLongAlarm, takenAt]);
 
   const enableAlarms = async () => {
+    await unlockAudio();
     window.localStorage.setItem("damla-alarmi-alarm-enabled", "true");
     setAlarmsEnabled(true);
-    await unlockAudio();
-    if ("Notification" in window) {
-      const permission = Notification.permission === "denied" ? "denied" : await Notification.requestPermission();
-      setNotifications(permission);
+    if (!("Notification" in window)) {
+      setScheduleWarning("Bu tarayıcı bildirimleri desteklemiyor.");
+      return;
     }
+    const permission = Notification.permission === "denied" ? "denied" : await Notification.requestPermission();
+    setNotifications(permission);
+    if (permission !== "granted") {
+      setScheduleWarning("Arka plan alarmı için bu siteye bildirim izni vermen gerekiyor.");
+      return;
+    }
+    setPushSyncRequest((request) => request + 1);
   };
 
-  const markDoseAt = (id: string, occurredAt = new Date()) => {
+  const markDoseAt = useCallback((id: string, occurredAt = new Date()) => {
     document.title = "Damla Alarmı";
     const badging = navigator as Navigator & { clearAppBadge?: () => Promise<void> };
     void badging.clearAppBadge?.();
+    void navigator.serviceWorker?.ready.then((registration) => registration.getNotifications({ tag: id }).then((notificationsForDose) => notificationsForDose.forEach((notification) => notification.close())));
     setCompleted((existing) => {
       const next = existing.includes(id) ? existing : [...existing, id];
       window.localStorage.setItem("damla-alarmi-completed", JSON.stringify(next));
@@ -335,7 +389,24 @@ export default function Home() {
       window.localStorage.setItem("damla-alarmi-taken-at", JSON.stringify(next));
       return next;
     });
-  };
+  }, []);
+
+  useEffect(() => {
+    const handleServiceWorkerMessage = (event: MessageEvent) => {
+      if (event.data?.type === "DOSE_ALARM_ACK" && typeof event.data.reminderId === "string" && reminders.some((reminder) => reminder.id === event.data.reminderId)) {
+        markDoseAt(event.data.reminderId);
+        setActiveAlarm(null);
+        stopLongAlarm();
+      }
+    };
+    navigator.serviceWorker?.addEventListener("message", handleServiceWorkerMessage);
+    const reminderId = new URLSearchParams(window.location.search).get("markReminder");
+    if (reminderId && reminders.some((reminder) => reminder.id === reminderId)) {
+      markDoseAt(reminderId);
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    return () => navigator.serviceWorker?.removeEventListener("message", handleServiceWorkerMessage);
+  }, [markDoseAt, stopLongAlarm]);
 
   const handleReminderClick = (reminder: Reminder) => {
     setEditingReminder(reminder);
@@ -366,7 +437,7 @@ export default function Home() {
           <div><p className="text-xs font-bold uppercase tracking-[.18em] text-[#4c8f8a]">Kişisel takip</p><h1 className="text-2xl font-bold tracking-tight">Damla Alarmı</h1></div>
         </div>
         <button onClick={enableAlarms} className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#10213a] px-4 py-3 text-sm font-bold text-white transition hover:-translate-y-0.5 hover:bg-[#193250] focus:outline-none focus:ring-4 focus:ring-[#10213a]/15">
-          {alarmsEnabled ? <BellRing size={17} /> : <Bell size={17} />}{alarmsEnabled ? "Alarmlar açık" : "Alarmları etkinleştir"}
+          {alarmsEnabled ? <BellRing size={17} /> : <Bell size={17} />}{alarmsEnabled ? backgroundPushReady ? "Arka plan alarmları açık" : "Alarmları etkinleştir" : "Alarmları etkinleştir"}
         </button>
       </header>
 
